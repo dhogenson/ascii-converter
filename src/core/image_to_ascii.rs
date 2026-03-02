@@ -9,41 +9,59 @@ const ASCII_SCALE: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@']
 pub fn render_image_to_ascii(input_path: &str, output_path: &str) -> Result<()> {
     let font_data = include_bytes!("../../assets/RobotoMono-Regular.ttf");
     let font = FontRef::try_from_slice(font_data)?;
-    let (advance, _, font_aspect) = get_font_metrics(&font, CHAR_HEIGHT as f32);
+    let (advance, glyph_height, _) = get_font_metrics(&font, CHAR_HEIGHT as f32);
 
     let img = ImageReader::open(input_path)?.decode()?;
-    let (width, _height) = img.dimensions();
+    let (width, height) = img.dimensions();
 
-    let block_w = width as f32 / ((width as f32 / advance).floor().max(1.0));
-    let block_h = block_w / font_aspect;
+    // Calculate cols based on width, then rows to maintain aspect ratio
+    // Aspect ratio: width/height = (cols * advance) / (rows * glyph_height)
+    // Therefore: rows = cols * advance * height / (width * glyph_height)
+    let cols = (width as f32 / advance).round().max(1.0) as u32;
+    let rows = ((cols as f32 * advance * height as f32) / (width as f32 * glyph_height))
+        .round()
+        .max(1.0) as u32;
 
-    let ascii = image_to_ascii(&img, block_w, block_h);
+    // Calculate block size based on character counts
+    let block_w = width as f32 / cols as f32;
+    let block_h = height as f32 / rows as f32;
 
-    render_image_to_ascii_core(&ascii, &font, output_path)?;
+    let ascii = image_to_ascii(&img, block_w, block_h, cols, rows);
+
+    render_image_to_ascii_core(&ascii, &font, output_path, width, height)?;
     Ok(())
 }
 
-pub fn render_image_to_ascii_core(ascii: &str, font: &FontRef, output_path: &str) -> Result<()> {
+pub fn render_image_to_ascii_core(
+    ascii: &str,
+    font: &FontRef,
+    output_path: &str,
+    orig_width: u32,
+    orig_height: u32,
+) -> Result<()> {
     let char_height = CHAR_HEIGHT as f32;
-    let (advance, glyph_height, _) = get_font_metrics(font, char_height);
+    let (advance, _glyph_height, _) = get_font_metrics(font, char_height);
 
-    let lines: Vec<&str> = ascii.lines().collect();
-    let num_lines = lines.len();
-    let max_chars = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-
-    let raw_width = (max_chars as f32 * advance).ceil() as u32;
-    let raw_height = (num_lines as f32 * glyph_height).ceil() as u32;
+    // Use original image dimensions for output
+    let raw_width = orig_width;
+    let raw_height = orig_height;
 
     let mut img_buf: ImageBuffer<Luma<u8>, Vec<u8>> =
         ImageBuffer::from_pixel(raw_width.max(1), raw_height.max(1), Luma([0]));
 
+    let lines: Vec<&str> = ascii.lines().collect();
+
+    // Scale glyph positions to fit within the output dimensions
+    let num_lines = lines.len().max(1) as f32;
+    let scaled_glyph_height = raw_height as f32 / num_lines;
+
     for (row, line) in lines.iter().enumerate() {
-        let row_y = row as f32 * glyph_height;
+        let row_y = row as f32 * scaled_glyph_height;
         let mut caret_x = 0.0f32;
 
         for ch in line.chars() {
             let mut glyph = font.as_scaled(char_height).scaled_glyph(ch);
-            glyph.position = point(caret_x, row_y + glyph_height);
+            glyph.position = point(caret_x, row_y + scaled_glyph_height);
 
             if let Some(outlined) = font.outline_glyph(glyph) {
                 let bounds = outlined.px_bounds();
@@ -65,12 +83,19 @@ pub fn render_image_to_ascii_core(ascii: &str, font: &FontRef, output_path: &str
     Ok(())
 }
 
-pub fn image_to_ascii(img: &DynamicImage, block_w: f32, block_h: f32) -> String {
+pub fn image_to_ascii(
+    img: &DynamicImage,
+    block_w: f32,
+    block_h: f32,
+    cols: u32,
+    rows: u32,
+) -> String {
     let rgba_img = img.to_rgba8();
     let (width, height) = rgba_img.dimensions();
 
-    let new_width = (width as f32 / block_w) as u32;
-    let new_height = (height as f32 / block_h) as u32;
+    // Use the pre-calculated dimensions
+    let new_width = cols;
+    let new_height = rows;
 
     let mut buffer = String::with_capacity((new_width * new_height) as usize + new_height as usize);
 
